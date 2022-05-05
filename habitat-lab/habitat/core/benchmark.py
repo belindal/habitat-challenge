@@ -142,20 +142,21 @@ class Benchmark:
         for i in pbar:
             observations = self._env.reset()
             # toilet, tv_monitor, or sofa
-            if observations['objectgoal'] not in [3, 4, 5]: continue
+            # if observations['objectgoal'] not in [3, 4, 5]: continue
+            if observations['objectgoal'] in [3, 4, 5]: continue
             agent.reset()
+            breakpoint()
 
             while not self._env.episode_over:
                 if agent.args.do_error_analysis:
                     # Add these fields for error analysis
                     observations['origin'] = np.array(self._env.current_episode.start_position)
                     observations['rotation_world_start'] = np.array(self._env.current_episode.start_rotation)
-                    # breakpoint()
                     observations['gt_goal_positions'] = [np.array(g.position) for g in self._env.current_episode.goals]
                     observations['success_distance'] = self._env.task.measurements.measures['success']._config.SUCCESS_DISTANCE
                     observations['self_position'] = self._env.task._sim.get_agent_state().position
                     observations['distance_to_goal'] = self._env.task.measurements.measures['distance_to_goal'].get_metric()
-                    observations['env_id'] = self._env.current_episode.episode_id
+                    observations['env_id'] = (eps.episode_id, os.path.split(eps.scene_id)[-1].split('.')[0], eps.goals[0].object_category)
                 action = agent.act(observations)
                 observations = self._env.step(action)
                 # if self._env.task.measurements.measures['distance_to_goal']._metric:
@@ -170,7 +171,7 @@ class Benchmark:
                 else:
                     agg_metrics[m] += v
             if agent.args.do_error_analysis:
-                result = {'envid': self._env.current_episode.episode_id, 'metrics': metrics, 'target': action['objectgoal']}
+                result = {'envid': (eps.episode_id, os.path.split(eps.scene_id)[-1].split('.')[0], eps.goals[0].object_category), 'metrics': metrics, 'target': action['objectgoal']}
                 for k in action:
                     if k not in ['objectgoal', 'action', 'success']:
                         result[k] = action[k]
