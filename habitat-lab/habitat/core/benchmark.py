@@ -136,27 +136,29 @@ class Benchmark:
 
         count_episodes = 0
         if agent.args.do_error_analysis:
-            with open(agent.args.do_error_analysis, "a") as wf:
+            os.makedirs(agent.args.dump_location, exist_ok=True)
+            results_file = os.path.join(agent.args.dump_location, "results.jsonl")
+            with open(results_file, "a") as wf:
                 wf.write("\n====\n")
         pbar = tqdm(range(num_episodes), desc="")
         for i in pbar:
             observations = self._env.reset()
             # toilet, tv_monitor, or sofa
             # if observations['objectgoal'] not in [3, 4, 5]: continue
-            if observations['objectgoal'] in [3, 4, 5]: continue
+            # if observations['objectgoal'] in [3, 4, 5]: continue
             agent.reset()
-            breakpoint()
 
             while not self._env.episode_over:
                 if agent.args.do_error_analysis:
                     # Add these fields for error analysis
-                    observations['origin'] = np.array(self._env.current_episode.start_position)
-                    observations['rotation_world_start'] = np.array(self._env.current_episode.start_rotation)
-                    observations['gt_goal_positions'] = [np.array(g.position) for g in self._env.current_episode.goals]
+                    eps = self._env.current_episode
+                    observations['origin'] = np.array(eps.start_position)
+                    observations['rotation_world_start'] = np.array(eps.start_rotation)
+                    observations['gt_goal_positions'] = [np.array(g.position) for g in eps.goals]
                     observations['success_distance'] = self._env.task.measurements.measures['success']._config.SUCCESS_DISTANCE
                     observations['self_position'] = self._env.task._sim.get_agent_state().position
                     observations['distance_to_goal'] = self._env.task.measurements.measures['distance_to_goal'].get_metric()
-                    observations['env_id'] = (eps.episode_id, os.path.split(eps.scene_id)[-1].split('.')[0], eps.goals[0].object_category)
+                    observations['env_id'] = '_'.join([eps.episode_id, os.path.split(eps.scene_id)[-1].split('.')[0], eps.goals[0].object_category])
                 action = agent.act(observations)
                 observations = self._env.step(action)
                 # if self._env.task.measurements.measures['distance_to_goal']._metric:
@@ -171,13 +173,13 @@ class Benchmark:
                 else:
                     agg_metrics[m] += v
             if agent.args.do_error_analysis:
-                result = {'envid': (eps.episode_id, os.path.split(eps.scene_id)[-1].split('.')[0], eps.goals[0].object_category), 'metrics': metrics, 'target': action['objectgoal']}
+                result = {'env_id': '_'.join([eps.episode_id, os.path.split(eps.scene_id)[-1].split('.')[0], eps.goals[0].object_category]), 'metrics': metrics, 'target': action['objectgoal']}
                 for k in action:
                     if k not in ['objectgoal', 'action', 'success']:
                         result[k] = action[k]
                 # 'saw_target_frames': action['saw_target'], 'nearby_objs': action['nearby_objs'], 
                 # write to file
-                with open(agent.args.do_error_analysis, "a") as wf:
+                with open(results_file, "a") as wf:
                     wf.write(json.dumps(result)+"\n")
             count_episodes += 1
             pbar.set_description(' '.join([
