@@ -20,7 +20,14 @@ from habitat.core.env import Env
 from tqdm import tqdm
 import json
 import os
+import time
 
+import pandas as pd
+category_mappings = pd.read_csv("/raid/lingo/bzl/habitat-challenge/habitat-sim/data/matterport_semantics/matterport_category_mappings.tsv", sep='    ', header=0)
+
+# name_to_mpcat40_id = {category.category: category.mpcat40index for category in category_mappings}
+
+# {'wall': 0, 'floor': 1, 'chair': 2, 'door': 3, 'table': 4, 'picture': 5, 'cabinet': 6, 'cushion': 7, 'window': 8, 'sofa': 9, 'bed': 10, 'curtain': 11, 'chest_of_drawers': 12, 'plant': 13, 'sink': 14, 'stairs': 15, 'ceiling': 16, 'toilet': 17, 'stool': 18, 'towel': 19, 'mirror': 20, 'tv_monitor': 21, 'shower': 22, 'column': 23, 'bathtub': 24, 'counter': 25, 'fireplace': 26, 'lighting': 27, 'beam': 28, 'railing': 29, 'shelving': 30, 'blinds': 31, 'gym_equipment': 32, 'seating': 33, 'board_panel': 34, 'furniture': 35, 'appliances': 36, 'clothes': 37, 'objects': 38, 'misc': 39, 'unlabeled': 40}
 
 class Benchmark:
     r"""Benchmark for evaluating agents in environments."""
@@ -141,11 +148,35 @@ class Benchmark:
             with open(results_file, "a") as wf:
                 wf.write("\n====\n")
         pbar = tqdm(range(num_episodes), desc="")
+        total_timesteps = 0
+        start_time = time.time()
         for i in pbar:
             observations = self._env.reset()
-            # toilet, tv_monitor, or sofa
-            # if observations['objectgoal'] not in [3, 4, 5]: continue
-            # if observations['objectgoal'] in [3, 4, 5]: continue
+            sem_category_id_to_names = [obj.category.name() for obj_id, obj in enumerate(self._env.sim.semantic_scene.objects)]
+            sem_category_id_to_mpcat40_ids = []
+            for obj_id, obj in enumerate(self._env.sim.semantic_scene.objects):
+                # cleanup
+                obj_name = obj.category.name().lower().strip()
+                obj_name = " ".join([term for term in obj_name.split(" ") if term != ''])
+                if "window" in obj_name:
+                    obj_name = "window"
+                elif "towel" in obj_name:
+                    obj_name = "towel"
+                elif "door" in obj_name:
+                    obj_name = "door"
+                elif "bascet" in obj_name:
+                    obj_name = "basket"
+                elif "lamp" in obj_name:
+                    obj_name = "lighting"
+                elif "tv" in obj_name:
+                    obj_name = "led tv"
+                if sum((category_mappings["raw_category"] == obj_name) | (category_mappings["category"] == obj_name) | (category_mappings['mpcat40'] == obj_name)) == 0:
+                    print(obj_name)
+                    cat_id = 40  # unknown
+                else:
+                    cat_id = category_mappings['mpcat40index'][(category_mappings["raw_category"] == obj_name) | (category_mappings["category"] == obj_name) | (category_mappings['mpcat40'] == obj_name)].iloc[0] - 1
+                sem_category_id_to_mpcat40_ids.append(cat_id)
+            sem_category_id_to_mpcat40_ids = np.array(sem_category_id_to_mpcat40_ids)
             agent.reset()
 
             while not self._env.episode_over:
@@ -159,7 +190,11 @@ class Benchmark:
                     observations['self_position'] = self._env.task._sim.get_agent_state().position
                     observations['distance_to_goal'] = self._env.task.measurements.measures['distance_to_goal'].get_metric()
                     observations['env_id'] = '_'.join([eps.episode_id, os.path.split(eps.scene_id)[-1].split('.')[0], eps.goals[0].object_category])
+                    observations['semantic_mapping'] = sem_category_id_to_mpcat40_ids
                 action = agent.act(observations)
+                total_timesteps += 1
+                if agent.timestep % 100 == 0:
+                    print(f"i={i}", f"timestep={agent.timestep}", f"avg time/step = {(time.time() - start_time) / total_timesteps}")
                 observations = self._env.step(action)
                 # if self._env.task.measurements.measures['distance_to_goal']._metric:
                 # false negative (but what if taret object not yet in sight????)
@@ -187,7 +222,7 @@ class Benchmark:
                 if not isinstance(agg_metrics[m], dict)
                 else f'{m}={json.dumps({sub_m: agg_metrics[m][sub_m] / count_episodes for sub_m in agg_metrics[m]})}'
                 for m in agg_metrics
-            ]))
+            ] + [f"time/step={round((time.time() - start_time) / total_timesteps, 2)}"]))
 
         avg_metrics = {k: v / count_episodes for k, v in agg_metrics.items()}
         if agent.args.do_error_analysis:
