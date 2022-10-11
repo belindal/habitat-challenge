@@ -21,6 +21,10 @@ from tqdm import tqdm
 import json
 import os
 import time
+from habitat.utils.geometry_utils import (
+    quaternion_from_coeff,
+    quaternion_rotate_vector,
+)
 
 import pandas as pd
 category_mappings = pd.read_csv("/raid/lingo/bzl/habitat-challenge/habitat-sim/data/matterport_semantics/matterport_category_mappings.tsv", sep='    ', header=0)
@@ -28,6 +32,22 @@ category_mappings = pd.read_csv("/raid/lingo/bzl/habitat-challenge/habitat-sim/d
 # name_to_mpcat40_id = {category.category: category.mpcat40index for category in category_mappings}
 
 # {'wall': 0, 'floor': 1, 'chair': 2, 'door': 3, 'table': 4, 'picture': 5, 'cabinet': 6, 'cushion': 7, 'window': 8, 'sofa': 9, 'bed': 10, 'curtain': 11, 'chest_of_drawers': 12, 'plant': 13, 'sink': 14, 'stairs': 15, 'ceiling': 16, 'toilet': 17, 'stool': 18, 'towel': 19, 'mirror': 20, 'tv_monitor': 21, 'shower': 22, 'column': 23, 'bathtub': 24, 'counter': 25, 'fireplace': 26, 'lighting': 27, 'beam': 28, 'railing': 29, 'shelving': 30, 'blinds': 31, 'gym_equipment': 32, 'seating': 33, 'board_panel': 34, 'furniture': 35, 'appliances': 36, 'clothes': 37, 'objects': 38, 'misc': 39, 'unlabeled': 40}
+def convert_to_gps_coords(
+    position, episode,
+):
+    origin = np.array(episode.start_position, dtype=np.float32)
+    rotation_world_start = quaternion_from_coeff(episode.start_rotation)
+
+    position = quaternion_rotate_vector(
+        rotation_world_start.inverse(), position - origin
+    )
+    return np.array(
+        [-position[2], position[0]], dtype=np.float32
+    )
+    # if self._dimensionality == 2:
+    # else:
+    #     return position.astype(np.float32)
+
 
 class Benchmark:
     r"""Benchmark for evaluating agents in environments."""
@@ -154,6 +174,8 @@ class Benchmark:
             observations = self._env.reset()
             sem_category_id_to_names = [obj.category.name() for obj_id, obj in enumerate(self._env.sim.semantic_scene.objects)]
             sem_category_id_to_mpcat40_ids = []
+
+            all_goal_objs = []
             for obj_id, obj in enumerate(self._env.sim.semantic_scene.objects):
                 # cleanup
                 obj_name = obj.category.name().lower().strip()
@@ -170,31 +192,73 @@ class Benchmark:
                     obj_name = "lighting"
                 elif "tv" in obj_name:
                     obj_name = "led tv"
+                elif obj_name == "lmap":
+                    obj_name = "lighting"
                 if sum((category_mappings["raw_category"] == obj_name) | (category_mappings["category"] == obj_name) | (category_mappings['mpcat40'] == obj_name)) == 0:
                     print(obj_name)
                     cat_id = 40  # unknown
                 else:
                     cat_id = category_mappings['mpcat40index'][(category_mappings["raw_category"] == obj_name) | (category_mappings["category"] == obj_name) | (category_mappings['mpcat40'] == obj_name)].iloc[0] - 1
                 sem_category_id_to_mpcat40_ids.append(cat_id)
+                if obj_name == self._env.current_episode.goals[0].object_category:
+                    all_goal_objs.append(obj)
             sem_category_id_to_mpcat40_ids = np.array(sem_category_id_to_mpcat40_ids)
+            room_id_to_location = {}
+            for room_id, room in enumerate(self._env.sim.semantic_scene.regions):
+                if int(room.id.split("_")[-1]) == -1: continue
+                # room_name = room.name()
+                obj_centers = np.stack([obj.aabb.center for obj in room.objects])
+                floors = [obj for obj in room.objects if obj.category.name() == "floor"]
+                if len(floors) == 0:
+                    continue
+                if len(floors) != 1:
+                    breakpoint()
+                floor_centers = np.stack([floor.aabb.center for floor in floors])
+                floor_sizes = np.stack([floor.aabb.sizes for floor in floors])
+                floor_max_xyz = (floor_centers + floor_sizes / 2)
+                floor_min_xyz = (floor_centers - floor_sizes / 2)
+                floor_xyz_ranges = np.stack([floor_min_xyz, floor_max_xyz], axis=-1)
+                ceilings = [obj for obj in room.objects if obj.category.name() == "ceiling"]
+                ceiling_centers = np.stack([ceil.aabb.center for ceil in ceilings])
+                ceiling_sizes = np.stack([ceil.aabb.sizes for ceil in ceilings])
+                ceiling_max_xyz = (ceiling_centers + ceiling_sizes / 2)
+                ceiling_min_xyz = (ceiling_centers - ceiling_sizes / 2)
+                ceiling_xyz_ranges = np.stack([ceiling_min_xyz, ceiling_max_xyz], axis=-1)
+                room_bb = floor_xyz_ranges
+                room_bb[:,1,1] = ceiling_xyz_ranges[:,1,1].max()
+                # walls = [obj for obj in room.objects if obj.category.name() == "wall"]
+                # max_xyz = (wall_centers + wall_sizes / 2).max(0)
+                # min_xyz = (wall_centers - wall_sizes / 2).min(0)
+                # room_xyz_bb = np.stack([min_xyz, max_xyz], axis=1)
+                room_id_to_location[room.id] = room_bb
+                # change to gps position...
+                # convert_to_gps_coords(floor_xyz_ranges, eps)
+
+
             agent.reset()
 
             while not self._env.episode_over:
+                eps = self._env.current_episode
+                env_id = '_'.join([eps.episode_id, os.path.split(eps.scene_id)[-1].split('.')[0], eps.goals[0].object_category])
+                observations['semantic_mapping'] = sem_category_id_to_mpcat40_ids
+                # TODO change to gps locations
+                observations['room_id_to_location'] = room_id_to_location
+                gt_goal_locations = [convert_to_gps_coords(goal_obj.aabb.center, eps) for goal_obj in all_goal_objs]
+                observations['gt_goal_positions'] = gt_goal_locations  #[np.array(g.position) for g in eps.goals]
+                observations['gt_goal_names'] = [goal_obj.category.name() for goal_obj in all_goal_objs]  #[np.array(g.position) for g in eps.goals]
                 if agent.args.do_error_analysis:
                     # Add these fields for error analysis
-                    eps = self._env.current_episode
                     observations['origin'] = np.array(eps.start_position)
                     observations['rotation_world_start'] = np.array(eps.start_rotation)
-                    observations['gt_goal_positions'] = [np.array(g.position) for g in eps.goals]
                     observations['success_distance'] = self._env.task.measurements.measures['success']._config.SUCCESS_DISTANCE
                     observations['self_position'] = self._env.task._sim.get_agent_state().position
                     observations['distance_to_goal'] = self._env.task.measurements.measures['distance_to_goal'].get_metric()
-                    observations['env_id'] = '_'.join([eps.episode_id, os.path.split(eps.scene_id)[-1].split('.')[0], eps.goals[0].object_category])
-                    observations['semantic_mapping'] = sem_category_id_to_mpcat40_ids
+                    observations['env_id'] = env_id
+                # transform room to gps coordinates?
                 action = agent.act(observations)
                 total_timesteps += 1
                 if agent.timestep % 100 == 0:
-                    print(f"i={i}", f"timestep={agent.timestep}", f"avg time/step = {(time.time() - start_time) / total_timesteps}")
+                    print(f"i={i}", f"env={env_id}", f"timestep={agent.timestep}", f"time/step = {(time.time() - start_time) / total_timesteps}")
                 observations = self._env.step(action)
                 # if self._env.task.measurements.measures['distance_to_goal']._metric:
                 # false negative (but what if taret object not yet in sight????)
@@ -208,7 +272,7 @@ class Benchmark:
                 else:
                     agg_metrics[m] += v
             if agent.args.do_error_analysis:
-                result = {'env_id': '_'.join([eps.episode_id, os.path.split(eps.scene_id)[-1].split('.')[0], eps.goals[0].object_category]), 'metrics': metrics, 'target': action['objectgoal']}
+                result = {'env_id': env_id, 'metrics': metrics, 'target': action['objectgoal']}
                 for k in action:
                     if k not in ['objectgoal', 'action', 'success']:
                         result[k] = action[k]
