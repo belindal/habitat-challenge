@@ -308,14 +308,26 @@ class Benchmark:
                 observations['room_id_to_aabb'] = room_id_to_location
                 observations['distance_to_goal'] = self._env.task.measurements.measures['distance_to_goal'].get_metric()
                 observations['gt_goal_positions'] = gt_goal_locations  #[np.array(g.position) for g in eps.goals]
-                observations['goal_rooms'] = rooms_containing_goal
+                if agent.args.explore_room_order == "gt":
+                    observations['goal_rooms'] = rooms_containing_goal
+                elif agent.args.explore_room_order == "distance":
+                    observations['goal_rooms'] = rooms_on_floor
+                elif agent.args.explore_room_order == "lm_prior":
+                    breakpoint()
+                # sort goal rooms by distance to current gps position
+                observations['goal_rooms'].sort(key=lambda room: ((observations["gps"] - convert_to_gps_coords(room_id_to_location[room].mean(-1), eps.start_position, eps.start_rotation))**2).sum())
+                # add in rest of rooms (also sorted by distance)
+                rooms_on_floor.sort(key=lambda room: ((observations["gps"] - convert_to_gps_coords(room_id_to_location[room].mean(-1), eps.start_position, eps.start_rotation))**2).sum())
+                for room in rooms_on_floor:
+                    if room not in observations['goal_rooms']:
+                        observations['goal_rooms'].append(room)
                 observations['accessible_rooms'] = rooms_on_floor
                 observations['gt_goal_name'] = eps.goals[0].object_category  #[np.array(g.position) for g in eps.goals]
                 observations['start'] = {'position': np.array(eps.start_position), 'rotation': np.array(eps.start_rotation)}
+                observations['self_abs_position'] = self._env.task._sim.get_agent_state().position
                 # if agent.args.do_error_analysis:
                 #     # Add these fields for error analysis
                 #     observations['success_distance'] = self._env.task.measurements.measures['success']._config.SUCCESS_DISTANCE
-                #     observations['self_position'] = self._env.task._sim.get_agent_state().position
                 #     observations['env_id'] = env_id
                 try:
                     assert (observations['gps'] == convert_to_gps_coords(self._env.task._sim.get_agent_state().position, eps.start_position, eps.start_rotation)).all()
