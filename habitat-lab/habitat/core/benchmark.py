@@ -27,16 +27,19 @@ from habitat.utils.geometry_utils import (
 )
 
 import pandas as pd
+import cv2
+from PIL import Image
+from quaternion import quaternion
 category_mappings = pd.read_csv("/raid/lingo/bzl/habitat-challenge/habitat-sim/data/matterport_semantics/matterport_category_mappings.tsv", sep='    ', header=0)
 
 # name_to_mpcat40_id = {category.category: category.mpcat40index for category in category_mappings}
 
 # {'wall': 0, 'floor': 1, 'chair': 2, 'door': 3, 'table': 4, 'picture': 5, 'cabinet': 6, 'cushion': 7, 'window': 8, 'sofa': 9, 'bed': 10, 'curtain': 11, 'chest_of_drawers': 12, 'plant': 13, 'sink': 14, 'stairs': 15, 'ceiling': 16, 'toilet': 17, 'stool': 18, 'towel': 19, 'mirror': 20, 'tv_monitor': 21, 'shower': 22, 'column': 23, 'bathtub': 24, 'counter': 25, 'fireplace': 26, 'lighting': 27, 'beam': 28, 'railing': 29, 'shelving': 30, 'blinds': 31, 'gym_equipment': 32, 'seating': 33, 'board_panel': 34, 'furniture': 35, 'appliances': 36, 'clothes': 37, 'objects': 38, 'misc': 39, 'unlabeled': 40}
 def convert_to_gps_coords(
-    position, episode,
+    position, episode_start_position, episode_start_rotation
 ):
-    origin = np.array(episode.start_position, dtype=np.float32)
-    rotation_world_start = quaternion_from_coeff(episode.start_rotation)
+    origin = np.array(episode_start_position, dtype=np.float32)
+    rotation_world_start = quaternion_from_coeff(episode_start_rotation)
 
     position = quaternion_rotate_vector(
         rotation_world_start.inverse(), position - origin
@@ -47,6 +50,18 @@ def convert_to_gps_coords(
     # if self._dimensionality == 2:
     # else:
     #     return position.astype(np.float32)
+
+def convert_to_world_coords(
+    position, episode_start_position, episode_start_rotation
+):
+    origin = np.array(episode_start_position, dtype=np.float32)
+    rotation_world_start = quaternion_from_coeff(episode_start_rotation)
+    position = np.array([position[1], 0.0, -position[0]], dtype=np.float32)
+
+    position = quaternion_rotate_vector(
+        rotation_world_start, position
+    ) + origin
+    return np.array(position, dtype=np.float32)
 
 
 class Benchmark:
@@ -170,8 +185,19 @@ class Benchmark:
         pbar = tqdm(range(num_episodes), desc="")
         total_timesteps = 0
         start_time = time.time()
+        # seen_scenes = set()
         for i in pbar:
             observations = self._env.reset()
+            eps = self._env.current_episode
+
+            # skip ones that aren't on the same floor as start
+            gt_goal_locations = [
+                np.array(goal.position) for goal in eps.goals if abs(goal.position[1] - eps.start_position[1]) < 0.5
+            ]
+            if len(gt_goal_locations) == 0:
+                continue
+
+            # if eps.scene_id in seen_scenes: continue
             sem_category_id_to_names = [obj.category.name() for obj_id, obj in enumerate(self._env.sim.semantic_scene.objects)]
             sem_category_id_to_mpcat40_ids = []
 
@@ -180,80 +206,121 @@ class Benchmark:
                 # cleanup
                 obj_name = obj.category.name().lower().strip()
                 obj_name = " ".join([term for term in obj_name.split(" ") if term != ''])
-                if "window" in obj_name:
-                    obj_name = "window"
-                elif "towel" in obj_name:
-                    obj_name = "towel"
-                elif "door" in obj_name:
-                    obj_name = "door"
-                elif "bascet" in obj_name:
-                    obj_name = "basket"
-                elif "lamp" in obj_name:
-                    obj_name = "lighting"
-                elif "tv" in obj_name:
-                    obj_name = "led tv"
-                elif obj_name == "lmap":
-                    obj_name = "lighting"
+                if "window" in obj_name: obj_name = "window"
+                elif "towel" in obj_name: obj_name = "towel"
+                elif "door" in obj_name: obj_name = "door"
+                elif "bascet" in obj_name: obj_name = "basket"
+                elif "lamp" in obj_name: obj_name = "lighting"
+                elif "tv" in obj_name: obj_name = "led tv"
+                elif obj_name == "lmap": obj_name = "lighting"
+                elif obj_name == "dorr": obj_name = "door"
+                elif obj_name == "unknwn": obj_name = "unknown"
                 if sum((category_mappings["raw_category"] == obj_name) | (category_mappings["category"] == obj_name) | (category_mappings['mpcat40'] == obj_name)) == 0:
                     print(obj_name)
                     cat_id = 40  # unknown
                 else:
                     cat_id = category_mappings['mpcat40index'][(category_mappings["raw_category"] == obj_name) | (category_mappings["category"] == obj_name) | (category_mappings['mpcat40'] == obj_name)].iloc[0] - 1
                 sem_category_id_to_mpcat40_ids.append(cat_id)
-                if obj_name == self._env.current_episode.goals[0].object_category:
+                if obj_name == eps.goals[0].object_category:
                     all_goal_objs.append(obj)
             sem_category_id_to_mpcat40_ids = np.array(sem_category_id_to_mpcat40_ids)
             room_id_to_location = {}
+            rooms_containing_goal = []
+            rooms_on_floor = []
             for room_id, room in enumerate(self._env.sim.semantic_scene.regions):
                 if int(room.id.split("_")[-1]) == -1: continue
-                # room_name = room.name()
                 obj_centers = np.stack([obj.aabb.center for obj in room.objects])
                 floors = [obj for obj in room.objects if obj.category.name() == "floor"]
-                if len(floors) == 0:
-                    continue
-                if len(floors) != 1:
-                    breakpoint()
-                floor_centers = np.stack([floor.aabb.center for floor in floors])
-                floor_sizes = np.stack([floor.aabb.sizes for floor in floors])
-                floor_max_xyz = (floor_centers + floor_sizes / 2)
-                floor_min_xyz = (floor_centers - floor_sizes / 2)
-                floor_xyz_ranges = np.stack([floor_min_xyz, floor_max_xyz], axis=-1)
                 ceilings = [obj for obj in room.objects if obj.category.name() == "ceiling"]
-                ceiling_centers = np.stack([ceil.aabb.center for ceil in ceilings])
-                ceiling_sizes = np.stack([ceil.aabb.sizes for ceil in ceilings])
-                ceiling_max_xyz = (ceiling_centers + ceiling_sizes / 2)
-                ceiling_min_xyz = (ceiling_centers - ceiling_sizes / 2)
-                ceiling_xyz_ranges = np.stack([ceiling_min_xyz, ceiling_max_xyz], axis=-1)
-                room_bb = floor_xyz_ranges
-                room_bb[:,1,1] = ceiling_xyz_ranges[:,1,1].max()
-                # walls = [obj for obj in room.objects if obj.category.name() == "wall"]
-                # max_xyz = (wall_centers + wall_sizes / 2).max(0)
-                # min_xyz = (wall_centers - wall_sizes / 2).min(0)
-                # room_xyz_bb = np.stack([min_xyz, max_xyz], axis=1)
+                if len(floors) > 0 and len(ceilings) > 0:
+                    floor_centers = np.stack([floor.aabb.center for floor in floors])
+                    floor_sizes = np.stack([floor.aabb.sizes for floor in floors])
+                    floor_max_xyz = (floor_centers + floor_sizes / 2)
+                    floor_min_xyz = (floor_centers - floor_sizes / 2)
+                    floor_xyz_ranges = np.stack([floor_min_xyz, floor_max_xyz], axis=-1)
+                    ceiling_centers = np.stack([ceil.aabb.center for ceil in ceilings])
+                    ceiling_sizes = np.stack([ceil.aabb.sizes for ceil in ceilings])
+                    ceiling_max_xyz = (ceiling_centers + ceiling_sizes / 2)
+                    ceiling_min_xyz = (ceiling_centers - ceiling_sizes / 2)
+                    ceiling_xyz_ranges = np.stack([ceiling_min_xyz, ceiling_max_xyz], axis=-1)
+                    room_bbs = floor_xyz_ranges
+                    room_bbs[:,1,1] = ceiling_xyz_ranges[:,1,1].max()
+                    room_bb = room_bbs[0]
+                    room_bb[:,0] = room_bbs[:,:,0].min(0)
+                    room_bb[:,1] = room_bbs[:,:,1].max(0)
+                else:
+                    # print(eps.scene_id, room.id)
+                    obj_centers = np.stack([obj.aabb.center for obj in room.objects])
+                    objs_max_xyz = obj_centers.max(0)
+                    objs_min_xyz = obj_centers.min(0)
+                    room_bb = np.stack([objs_min_xyz, objs_max_xyz], axis=-1)
                 room_id_to_location[room.id] = room_bb
-                # change to gps position...
-                # convert_to_gps_coords(floor_xyz_ranges, eps)
-
+                """
+                get rooms with goal & rooms on floor
+                """
+                for goal_location in gt_goal_locations:
+                    if (goal_location >= room_bb[:,0]).all() and (goal_location <= room_bb[:,1]).all():
+                        rooms_containing_goal.append(room.id)
+                if eps.start_position[1] >= room_bb[1,0] and eps.start_position[1] <= room_bb[1,1]:
+                    rooms_on_floor.append(room.id)
+                """ # generate snapshots of rooms
+                room_center = room.aabb.center
+                agent_rotation = self._env.task._sim.get_agent_state().rotation
+                room_corner_views = [
+                    ["corner", room_bb[:,0], quaternion(-0.3826834, 0, 0.9238795, 0)],
+                    ["corner", np.array([room_bb[0,1], room_bb[1,0], room_bb[2,1]]), quaternion(0.9238795, 0, 0.3826834, 0)],
+                    ["corner", np.array([room_bb[0,1], room_bb[1,0], room_bb[2,0]]), quaternion(0.3826834, 0, 0.9238795, 0)],
+                    ["corner", np.array([room_bb[0,0], room_bb[1,0], room_bb[2,1]]), quaternion(-0.9238795, 0, 0.3826834, 0)],
+                ]
+                room_center = room_bb.mean(-1)
+                room_center[1] = room_bb[1,0]
+                snapshots = [
+                    ["center", room_center, quaternion(0.9238795, 0, 0.3826834, 0)], ["center",room_center, quaternion(-0.9238795, 0, 0.3826834, 0)],
+                    ["center", room_center, quaternion(0.7071068, 0, 0.7071068, 0)], ["center",room_center, quaternion(-0.7071068, 0, 0.7071068, 0)],
+                    ["center", room_center, quaternion(0.3826834, 0, 0.9238795, 0)], ["center",room_center, quaternion(-0.3826834, 0, 0.9238795, 0)],
+                    ["center", room_center, quaternion(1.0, 0, 0, 0)], ["center",room_center, quaternion(-1.0, 0, 0, 0).inverse()],
+                    *room_corner_views
+                ]
+                directory = os.path.join("room_classification_images", f"{os.path.split(os.path.split(eps.scene_id)[0])[-1]}", f"room{room.id}")
+                os.makedirs(directory, exist_ok=True)
+                for position_name, position, rotation in snapshots:
+                    observations_in_room = self._env.sim.get_observations_at(position=position, rotation=rotation)
+                    rgb_in_room = Image.fromarray(observations_in_room['rgb'])
+                    rgb_in_room.save(os.path.join(directory, f"{position_name}_rot{rotation.tolist()}.png"))
+                # for obj in room.objects: print(obj.category.name())
+                with open("room_classification_images/saved_annotations.txt", "a") as wf:
+                    wf.write(json.dumps({
+                        "scene_id": eps.scene_id, "room_id": room.id, "label": "",
+                        "images": directory, "center_XYZ": room_center.tolist(), "aabb_XYZ": room_bb.tolist(),
+                        "scene_url": f"https://aihabitat.org/datasets/hm3d/{os.path.split(os.path.split(eps.scene_id)[0])[-1]}/index.html",
+                    })+"\n")
+                    wf.flush()
+                # """
+            # # TODO DELETE
+            # seen_scenes.add(eps.scene_id)
 
             agent.reset()
 
             while not self._env.episode_over:
-                eps = self._env.current_episode
                 env_id = '_'.join([eps.episode_id, os.path.split(eps.scene_id)[-1].split('.')[0], eps.goals[0].object_category])
                 observations['semantic_mapping'] = sem_category_id_to_mpcat40_ids
                 # TODO change to gps locations
-                observations['room_id_to_location'] = room_id_to_location
-                gt_goal_locations = [convert_to_gps_coords(goal_obj.aabb.center, eps) for goal_obj in all_goal_objs]
+                observations['room_id_to_aabb'] = room_id_to_location
+                observations['distance_to_goal'] = self._env.task.measurements.measures['distance_to_goal'].get_metric()
                 observations['gt_goal_positions'] = gt_goal_locations  #[np.array(g.position) for g in eps.goals]
-                observations['gt_goal_names'] = [goal_obj.category.name() for goal_obj in all_goal_objs]  #[np.array(g.position) for g in eps.goals]
-                if agent.args.do_error_analysis:
-                    # Add these fields for error analysis
-                    observations['origin'] = np.array(eps.start_position)
-                    observations['rotation_world_start'] = np.array(eps.start_rotation)
-                    observations['success_distance'] = self._env.task.measurements.measures['success']._config.SUCCESS_DISTANCE
-                    observations['self_position'] = self._env.task._sim.get_agent_state().position
-                    observations['distance_to_goal'] = self._env.task.measurements.measures['distance_to_goal'].get_metric()
-                    observations['env_id'] = env_id
+                observations['goal_rooms'] = rooms_containing_goal
+                observations['accessible_rooms'] = rooms_on_floor
+                observations['gt_goal_name'] = eps.goals[0].object_category  #[np.array(g.position) for g in eps.goals]
+                observations['start'] = {'position': np.array(eps.start_position), 'rotation': np.array(eps.start_rotation)}
+                # if agent.args.do_error_analysis:
+                #     # Add these fields for error analysis
+                #     observations['success_distance'] = self._env.task.measurements.measures['success']._config.SUCCESS_DISTANCE
+                #     observations['self_position'] = self._env.task._sim.get_agent_state().position
+                #     observations['env_id'] = env_id
+                try:
+                    assert (observations['gps'] == convert_to_gps_coords(self._env.task._sim.get_agent_state().position, eps.start_position, eps.start_rotation)).all()
+                except:
+                    breakpoint()
                 # transform room to gps coordinates?
                 action = agent.act(observations)
                 total_timesteps += 1
@@ -272,7 +339,7 @@ class Benchmark:
                 else:
                     agg_metrics[m] += v
             if agent.args.do_error_analysis:
-                result = {'env_id': env_id, 'metrics': metrics, 'target': action['objectgoal']}
+                result = {'env_id': env_id, 'metrics': metrics, 'target': eps.goals[0].object_category}
                 for k in action:
                     if k not in ['objectgoal', 'action', 'success']:
                         result[k] = action[k]
@@ -289,10 +356,10 @@ class Benchmark:
             ] + [f"time/step={round((time.time() - start_time) / total_timesteps, 2)}"]))
 
         avg_metrics = {k: v / count_episodes for k, v in agg_metrics.items()}
-        if agent.args.do_error_analysis:
-            # log metrics
-            with open(agent.args.do_error_analysis, "a") as wf:
-                wf.write("Metrics: "+json.dumps(avg_metrics)+"\n")
+        # if agent.args.do_error_analysis:
+        #     # log metrics
+        #     with open(agent.args.do_error_analysis, "a") as wf:
+        #         wf.write("Metrics: "+json.dumps(avg_metrics)+"\n")
 
         return avg_metrics
 
