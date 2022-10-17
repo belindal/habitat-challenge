@@ -30,7 +30,31 @@ import pandas as pd
 import cv2
 from PIL import Image
 from quaternion import quaternion
+import csv
 category_mappings = pd.read_csv("/raid/lingo/bzl/habitat-challenge/habitat-sim/data/matterport_semantics/matterport_category_mappings.tsv", sep='    ', header=0)
+
+possible_labels = ["OK", "Not OK"]
+# (n_items, n_rooms)
+hm3d_items2room_cooccurs = np.load("/raid/lingo/bzl/Stubborn/rednet-finetuning/figures/gpt3_room_obj_plausimplaus_hm3d_cooccurence.npy", allow_pickle=True)
+hm3d_items = [
+    'wall', 'floor', 'chair', 'door', 'table', # 5
+    'picture', 'cabinet', 'cushion', 'window', 'sofa',
+    'bed', 'curtain', 'chest_of_drawers', 'plant', 'sink',
+    'stairs', 'ceiling', 'toilet', 'stool', 'towel', # 20
+    'mirror', 'tv_monitor', 'shower', 'column', 'bathtub',
+    'counter', 'fireplace', 'lighting', 'beam', 'railing',
+    'shelving', 'blinds', 'gym_equipment', # 33
+    'seating', 'board_panel',
+    'furniture', 'appliances', 'clothes', 'objects', 'misc',
+    'unlabeled' # 41
+]
+rooms = [
+     'bedroom', 'bathroom', 'closet', 'hallway', 'living room', 'dining room',
+     'kitchen', 'entrance', 'basement', 'staircase', 'laundry room',
+     'office', 'patio', 'stairs', 'lounge', 'sauna', 'shower room',
+     'playroom', 'garage', 'shed', 'storage', 'baby room', 'study',
+     "kid's room", 'gym', 'shower', 'attic', 'dressing room', 'pantry']
+
 
 # name_to_mpcat40_id = {category.category: category.mpcat40index for category in category_mappings}
 
@@ -177,15 +201,42 @@ class Benchmark:
         agg_metrics: Dict = defaultdict(float)
 
         count_episodes = 0
+        existing_results = set()
         if agent.args.do_error_analysis:
             os.makedirs(agent.args.dump_location, exist_ok=True)
             results_file = os.path.join(agent.args.dump_location, "results.jsonl")
+            # if os.path.exists(results_file):
+            #     with open(results_file) as f:
+            #         for line in f:
+            #             line = json.loads(line)
+            #             existing_results.add(line['env_id'])
             with open(results_file, "a") as wf:
                 wf.write("\n====\n")
         pbar = tqdm(range(num_episodes), desc="")
         total_timesteps = 0
         start_time = time.time()
         # seen_scenes = set()
+        n_nonskipped = 0
+        room_annotations = csv.reader(open("room_classification_images/room_annotations.csv"))
+        room2roomtype = {}
+        roomtype2room = {}
+        for annotation in room_annotations:
+            if len(annotation[2].strip().strip('-')) == 0 or "unclear" in annotation[2]: continue
+            room_types = annotation[2].split(',')
+            if annotation[0] not in room2roomtype:
+                room2roomtype[annotation[0]] = {}
+            if annotation[1] not in room2roomtype[annotation[0]]:
+                room2roomtype[annotation[0]][annotation[1]] = []
+            for room_type in room_types:
+                room_type = room_type.strip()
+                room2roomtype[annotation[0]][annotation[1]].append(room_type)
+                if room_type not in roomtype2room:
+                    roomtype2room[room_type] = {}
+                if annotation[0] not in roomtype2room[room_type]:
+                    roomtype2room[room_type][annotation[0]] = {}
+                roomtype2room[room_type][annotation[0]][annotation[1]] = 1.0 / len(room_types)
+        room_found = []
+        room_accuracy = []
         for i in pbar:
             observations = self._env.reset()
             eps = self._env.current_episode
@@ -196,6 +247,9 @@ class Benchmark:
             ]
             if len(gt_goal_locations) == 0:
                 continue
+            goal_obj = eps.goals[0].object_category
+            env_id = '_'.join([eps.episode_id, os.path.split(eps.scene_id)[-1].split('.')[0], goal_obj])
+            if env_id in existing_results: continue
 
             # if eps.scene_id in seen_scenes: continue
             sem_category_id_to_names = [obj.category.name() for obj_id, obj in enumerate(self._env.sim.semantic_scene.objects)]
@@ -221,7 +275,7 @@ class Benchmark:
                 else:
                     cat_id = category_mappings['mpcat40index'][(category_mappings["raw_category"] == obj_name) | (category_mappings["category"] == obj_name) | (category_mappings['mpcat40'] == obj_name)].iloc[0] - 1
                 sem_category_id_to_mpcat40_ids.append(cat_id)
-                if obj_name == eps.goals[0].object_category:
+                if obj_name == goal_obj:
                     all_goal_objs.append(obj)
             sem_category_id_to_mpcat40_ids = np.array(sem_category_id_to_mpcat40_ids)
             room_id_to_location = {}
@@ -261,7 +315,7 @@ class Benchmark:
                 for goal_location in gt_goal_locations:
                     if (goal_location >= room_bb[:,0]).all() and (goal_location <= room_bb[:,1]).all():
                         rooms_containing_goal.append(room.id)
-                if eps.start_position[1] >= room_bb[1,0] and eps.start_position[1] <= room_bb[1,1]:
+                if eps.start_position[1] >= room_bb[1,0] and eps.start_position[1] <= room_bb[1,0] + 1.0:  #room_bb[1,1]:
                     rooms_on_floor.append(room.id)
                 """ # generate snapshots of rooms
                 room_center = room.aabb.center
@@ -298,11 +352,38 @@ class Benchmark:
                 # """
             # # TODO DELETE
             # seen_scenes.add(eps.scene_id)
+            lm_rooms_containing_goal = []
+            room2lm_score = {rooms[i]: hm3d_items2room_cooccurs[hm3d_items.index(goal_obj),i] for i in range(len(rooms))}
+            sorted_room_types = sorted(rooms, key=room2lm_score.get, reverse=True)
+            """
+            find best room -- top of sorted list (if not > 0.95, delete)
+            """
+            for room_type in sorted_room_types:
+                rooms_of_type = roomtype2room.get(room_type, {}).get(eps.scene_id, {})
+                accessible_rooms_of_type = list(set(rooms_on_floor).intersection(set(rooms_of_type.keys())))
+                if len(accessible_rooms_of_type) > 0 or room2lm_score[room_type] < 0.3: break
+            if room2lm_score[room_type] >= 0.3:
+                # sort by "proportion" of region dedicated to this room
+                accessible_rooms_of_type = sorted(accessible_rooms_of_type, key=rooms_of_type.get, reverse=True)
+                lm_rooms_containing_goal.extend(accessible_rooms_of_type)
+                # if goal_obj == "chair": breakpoint()
+                # # is confidence we'll find obj in this room type > 0.95?
+                # room_goal_cooccur_confidences = max(room2lm_score[room_type] for room_type in room2roomtype[eps.scene_id][lm_rooms_containing_goal[0]])
+                # if room_goal_cooccur_confidences < 0.95:
+                #     lm_rooms_containing_goal = []
+            room_intersection = set(lm_rooms_containing_goal).intersection(set(rooms_containing_goal))
+            # with open(f"{agent.args.dump_location}/objroom_cooccurs_nav.jsonl", "a") as wf:
+            #     real_roomtypes = [room2roomtype[eps.scene_id].get(room, "Unknown") for room in rooms_containing_goal]
+            #     pred_roomtypes = [room2roomtype[eps.scene_id].get(room, "Unknown") for room in lm_rooms_containing_goal]
+            #     accessible_rooms = [room2roomtype[eps.scene_id].get(room, "Unknown") for room in rooms_on_floor]
+            #     wf.write(json.dumps({"goal": goal_obj, "actual rooms": real_roomtypes, "pred room": pred_roomtypes, "accessible rooms": accessible_rooms, "eps": env_id})+"\n")
+            #     # breakpoint()
+            room_found.append(len(lm_rooms_containing_goal) > 0)
+            room_accuracy.append(len(room_intersection) > 0)
 
             agent.reset()
 
             while not self._env.episode_over:
-                env_id = '_'.join([eps.episode_id, os.path.split(eps.scene_id)[-1].split('.')[0], eps.goals[0].object_category])
                 observations['semantic_mapping'] = sem_category_id_to_mpcat40_ids
                 # TODO change to gps locations
                 observations['room_id_to_aabb'] = room_id_to_location
@@ -313,16 +394,18 @@ class Benchmark:
                 elif agent.args.explore_room_order == "distance":
                     observations['goal_rooms'] = rooms_on_floor
                 elif agent.args.explore_room_order == "lm_prior":
-                    breakpoint()
+                    observations['goal_rooms'] = lm_rooms_containing_goal
                 # sort goal rooms by distance to current gps position
                 observations['goal_rooms'].sort(key=lambda room: ((observations["gps"] - convert_to_gps_coords(room_id_to_location[room].mean(-1), eps.start_position, eps.start_rotation))**2).sum())
+                """
                 # add in rest of rooms (also sorted by distance)
                 rooms_on_floor.sort(key=lambda room: ((observations["gps"] - convert_to_gps_coords(room_id_to_location[room].mean(-1), eps.start_position, eps.start_rotation))**2).sum())
                 for room in rooms_on_floor:
                     if room not in observations['goal_rooms']:
                         observations['goal_rooms'].append(room)
+                # """
                 observations['accessible_rooms'] = rooms_on_floor
-                observations['gt_goal_name'] = eps.goals[0].object_category  #[np.array(g.position) for g in eps.goals]
+                observations['gt_goal_name'] = goal_obj  #[np.array(g.position) for g in eps.goals]
                 observations['start'] = {'position': np.array(eps.start_position), 'rotation': np.array(eps.start_rotation)}
                 observations['self_abs_position'] = self._env.task._sim.get_agent_state().position
                 # if agent.args.do_error_analysis:
@@ -343,6 +426,7 @@ class Benchmark:
                 # false negative (but what if taret object not yet in sight????)
                 # self._env.task._sim.get_agent_state().position
 
+            existing_results.add(env_id)
             metrics = self._env.get_metrics()
             for m, v in metrics.items():
                 if isinstance(v, dict):
@@ -351,12 +435,17 @@ class Benchmark:
                 else:
                     agg_metrics[m] += v
             if agent.args.do_error_analysis:
-                result = {'env_id': env_id, 'metrics': metrics, 'target': eps.goals[0].object_category}
+                result = {'env_id': env_id, 'metrics': metrics, 'target': goal_obj}
                 for k in action:
                     if k not in ['objectgoal', 'action', 'success']:
                         result[k] = action[k]
                 # 'saw_target_frames': action['saw_target'], 'nearby_objs': action['nearby_objs'], 
                 # write to file
+                if agent.args.explore_room_order == "lm_prior":
+                    real_roomtypes = [room2roomtype[eps.scene_id].get(room, "Unknown") for room in rooms_containing_goal]
+                    pred_roomtypes = [room2roomtype[eps.scene_id].get(room, "Unknown") for room in lm_rooms_containing_goal]
+                    accessible_rooms = [room2roomtype[eps.scene_id].get(room, "Unknown") for room in rooms_on_floor]
+                    result = {**result, "actual rooms": real_roomtypes, "pred room": pred_roomtypes, "accessible rooms": accessible_rooms, "correctly pred room": list(room_intersection)}
                 with open(results_file, "a") as wf:
                     wf.write(json.dumps(result)+"\n")
             count_episodes += 1
@@ -365,7 +454,7 @@ class Benchmark:
                 if not isinstance(agg_metrics[m], dict)
                 else f'{m}={json.dumps({sub_m: agg_metrics[m][sub_m] / count_episodes for sub_m in agg_metrics[m]})}'
                 for m in agg_metrics
-            ] + [f"time/step={round((time.time() - start_time) / total_timesteps, 2)}"]))
+            ] + [f"room acc={sum(room_accuracy) / len(room_accuracy)}"] + [f"time/step={round((time.time() - start_time) / total_timesteps, 2)}"]))
 
         avg_metrics = {k: v / count_episodes for k, v in agg_metrics.items()}
         # if agent.args.do_error_analysis:
