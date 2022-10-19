@@ -200,6 +200,7 @@ class Benchmark:
         assert num_episodes > 0, "num_episodes should be greater than 0"
 
         agg_metrics: Dict = defaultdict(float)
+        extra_objs_success = []
 
         count_episodes = 0
         existing_results = set()
@@ -255,12 +256,14 @@ class Benchmark:
             # if os.path.split(eps.scene_id)[-1].split('.')[0] != "Nfvxx8J5NCo": continue
             # if os.path.split(eps.scene_id)[-1].split('.')[0] != "5cdEh9F2hJL": continue
             # if os.path.split(eps.scene_id)[-1].split('.')[0] != "q3zU7Yy5E5s": continue
+            # if env_id != "32_wcojb4TFT35_sofa": continue
             if env_id in existing_results: continue
-            if eps.scene_id in seen_scenes: continue
+            # if eps.scene_id in seen_scenes: continue
             sem_category_id_to_names = [obj.category.name() for obj_id, obj in enumerate(self._env.sim.semantic_scene.objects)]
             sem_category_id_to_mpcat40_ids = []
 
             all_goal_objs = []
+            extra_goal_positions = []
             missing_goal = False
             for obj_id, obj in enumerate(self._env.sim.semantic_scene.objects):
                 # cleanup
@@ -289,16 +292,15 @@ class Benchmark:
                 if obj_name == goal_obj:
                     all_goal_objs.append(obj)
                     if obj_id not in goal_ids:
-                        missing_goal = True
-                        break
-            # eps.goals.extend([ObjectGoal(object_id=obj.id.split('_')[-1], object_name=obj.category.name(), object_category=obj.id, position=obj.aabb.center) for obj in all_goal_objs])
-            if len(all_goal_objs) != len(eps.goals) or missing_goal:
-                # # discongruity in annotation (potentially wrong annotation), skip
-                # with open ("bad_episodes.txt", "a") as wf:
-                #     wf.write(env_id + "\n")
-                continue
+                        extra_goal_positions.append([obj.aabb.center, obj.aabb.sizes])
+            # # eps.goals.extend([ObjectGoal(object_id=obj.id.split('_')[-1], object_name=obj.category.name(), object_category=obj.id, position=obj.aabb.center) for obj in all_goal_objs])
+            # if len(all_goal_objs) != len(eps.goals) or missing_goal:
+            #     # # discongruity in annotation (potentially wrong annotation), skip
+            #     # with open ("bad_episodes.txt", "a") as wf:
+            #     #     wf.write(env_id + "\n")
+            #     continue
             sem_category_id_to_mpcat40_ids = np.array(sem_category_id_to_mpcat40_ids)
-            room_id_to_location = {}
+            room_id_to_info = {}
             rooms_containing_goal = []
             rooms_on_floor = []
             for room_id, room in enumerate(self._env.sim.semantic_scene.regions):
@@ -328,7 +330,7 @@ class Benchmark:
                     objs_max_xyz = obj_centers.max(0)
                     objs_min_xyz = obj_centers.min(0)
                     room_bb = np.stack([objs_min_xyz, objs_max_xyz], axis=-1)
-                room_id_to_location[room.id] = room_bb
+                room_id_to_info[room.id] = {'bb': room_bb, 'name': room2roomtype[eps.scene_id].get(room.id, ["Unknown"])}
                 """
                 get rooms with goal & rooms on floor
                 """
@@ -420,25 +422,27 @@ class Benchmark:
             while not self._env.episode_over:
                 observations['semantic_mapping'] = sem_category_id_to_mpcat40_ids
                 # TODO change to gps locations
-                observations['room_id_to_aabb'] = room_id_to_location
+                observations['room_id_to_info'] = room_id_to_info
                 observations['distance_to_goal'] = self._env.task.measurements.measures['distance_to_goal'].get_metric()
                 observations['gt_goal_positions'] = gt_goal_locations  #[np.array(g.position) for g in eps.goals]
+                if agent.args.explore_room_order == "lm_prior" or agent.args.explore_room_order == "gt_prior":
+                    observations['room2score'] = room2score
                 if agent.args.explore_room_order == "gt":
                     observations['goal_rooms'] = rooms_containing_goal
                     # sort goal rooms by distance to current gps position
-                    observations['goal_rooms'].sort(key=lambda room: ((observations["gps"] - convert_to_gps_coords(room_id_to_location[room].mean(-1), eps.start_position, eps.start_rotation))**2).sum())
+                    observations['goal_rooms'].sort(key=lambda room: ((observations["gps"] - convert_to_gps_coords(room_id_to_info[room]['bb'].mean(-1), eps.start_position, eps.start_rotation))**2).sum())
                 elif agent.args.explore_room_order == "distance":
                     observations['goal_rooms'] = rooms_on_floor
                     # sort goal rooms by distance to current gps position
-                    observations['goal_rooms'].sort(key=lambda room: ((observations["gps"] - convert_to_gps_coords(room_id_to_location[room].mean(-1), eps.start_position, eps.start_rotation))**2).sum())
+                    observations['goal_rooms'].sort(key=lambda room: ((observations["gps"] - convert_to_gps_coords(room_id_to_info[room]['bb'].mean(-1), eps.start_position, eps.start_rotation))**2).sum())
                 elif agent.args.explore_room_order in ["lm_prior", "gt_prior"]:
                     observations['goal_rooms'] = prior_rooms_containing_goal
                     # sort goal rooms by distance to current gps position
-                    observations['goal_rooms'].sort(key=lambda room: (rooms_of_type.get, ((observations["gps"] - convert_to_gps_coords(room_id_to_location[room].mean(-1), eps.start_position, eps.start_rotation))**2).sum()))
+                    observations['goal_rooms'].sort(key=lambda room: (rooms_of_type.get, ((observations["gps"] - convert_to_gps_coords(room_id_to_info[room]['bb'].mean(-1), eps.start_position, eps.start_rotation))**2).sum()))
                 # breakpoint()
                 """
                 # add in rest of rooms (also sorted by distance)
-                rooms_on_floor.sort(key=lambda room: ((observations["gps"] - convert_to_gps_coords(room_id_to_location[room].mean(-1), eps.start_position, eps.start_rotation))**2).sum())
+                rooms_on_floor.sort(key=lambda room: ((observations["gps"] - convert_to_gps_coords(room_id_to_info[room].mean(-1), eps.start_position, eps.start_rotation))**2).sum())
                 for room in rooms_on_floor:
                     if room not in observations['goal_rooms']:
                         observations['goal_rooms'].append(room)
@@ -473,8 +477,17 @@ class Benchmark:
                         agg_metrics[m + "/" + str(sub_m)] += sub_v
                 else:
                     agg_metrics[m] += v
+            if len(extra_goal_positions) > 0:
+                extra_goals_success = max([
+                    (np.absolute((self._env.task._sim.get_agent_state().position - goal_position[0])) < (goal_position[1] / 2) + 0.1).all()
+                for goal_position in extra_goal_positions]) and action['stop_reason'] == "found goal"
+                agg_metrics["all_goal_successes"] = extra_goals_success and agg_metrics["success"]
             if agent.args.do_error_analysis:
-                result = {'env_id': env_id, 'metrics': metrics, 'target': goal_obj}
+                result = {
+                    'env_id': env_id, 'metrics': metrics, 'target': goal_obj,
+                    "final_position": self._env.task._sim.get_agent_state().position.tolist(),
+                    "extra_goal_positions": [gp.tolist() for gp in extra_goal_positions],
+                }
                 for k in action:
                     if k not in ['objectgoal', 'action', 'success']:
                         result[k] = action[k]
