@@ -207,11 +207,12 @@ class Benchmark:
         if agent.args.do_error_analysis:
             os.makedirs(agent.args.dump_location, exist_ok=True)
             results_file = os.path.join(agent.args.dump_location, "results.jsonl")
-            # if os.path.exists(results_file):
-            #     with open(results_file) as f:
-            #         for line in f:
-            #             line = json.loads(line)
-            #             existing_results.add(line['env_id'])
+            if os.path.exists(results_file):
+                with open(results_file) as f:
+                    for line in f:
+                        if "====" in line or line.strip() == "": continue
+                        line = json.loads(line)
+                        existing_results.add(line['env_id'])
             with open(results_file, "a") as wf:
                 wf.write("\n====\n")
         pbar = tqdm(range(num_episodes), desc="")
@@ -263,7 +264,7 @@ class Benchmark:
             sem_category_id_to_mpcat40_ids = []
 
             all_goal_objs = []
-            extra_goal_positions = []
+            extra_goal_objs = []
             missing_goal = False
             for obj_id, obj in enumerate(self._env.sim.semantic_scene.objects):
                 # cleanup
@@ -292,7 +293,7 @@ class Benchmark:
                 if obj_name == goal_obj:
                     all_goal_objs.append(obj)
                     if obj_id not in goal_ids:
-                        extra_goal_positions.append([obj.aabb.center, obj.aabb.sizes])
+                        extra_goal_objs.append(obj)
             # # eps.goals.extend([ObjectGoal(object_id=obj.id.split('_')[-1], object_name=obj.category.name(), object_category=obj.id, position=obj.aabb.center) for obj in all_goal_objs])
             # if len(all_goal_objs) != len(eps.goals) or missing_goal:
             #     # # discongruity in annotation (potentially wrong annotation), skip
@@ -451,6 +452,7 @@ class Benchmark:
                 observations['gt_goal_name'] = goal_obj  #[np.array(g.position) for g in eps.goals]
                 observations['start'] = {'position': np.array(eps.start_position), 'rotation': np.array(eps.start_rotation)}
                 observations['self_abs_position'] = self._env.task._sim.get_agent_state().position
+                observations['env_id'] = env_id
                 # if agent.args.do_error_analysis:
                 #     # Add these fields for error analysis
                 #     observations['success_distance'] = self._env.task.measurements.measures['success']._config.SUCCESS_DISTANCE
@@ -471,22 +473,23 @@ class Benchmark:
 
             existing_results.add(env_id)
             metrics = self._env.get_metrics()
+            extra_goals_success = False
+            if len(extra_goal_objs) > 0:
+                extra_goals_success = max([
+                    (np.absolute((self._env.task._sim.get_agent_state().position - goal_obj.aabb.center)) < (goal_obj.aabb.sizes / 2) + 0.1).all()
+                for goal_obj in extra_goal_objs]) and action['stop_reason'] == "found goal"
+            metrics["all_goal_successes"] = (len(extra_goal_objs) > 0 and extra_goals_success) or agg_metrics["success"]
             for m, v in metrics.items():
                 if isinstance(v, dict):
                     for sub_m, sub_v in v.items():
                         agg_metrics[m + "/" + str(sub_m)] += sub_v
                 else:
                     agg_metrics[m] += v
-            if len(extra_goal_positions) > 0:
-                extra_goals_success = max([
-                    (np.absolute((self._env.task._sim.get_agent_state().position - goal_position[0])) < (goal_position[1] / 2) + 0.1).all()
-                for goal_position in extra_goal_positions]) and action['stop_reason'] == "found goal"
-                agg_metrics["all_goal_successes"] = extra_goals_success and agg_metrics["success"]
             if agent.args.do_error_analysis:
                 result = {
                     'env_id': env_id, 'metrics': metrics, 'target': goal_obj,
                     "final_position": self._env.task._sim.get_agent_state().position.tolist(),
-                    "extra_goal_positions": [gp.tolist() for gp in extra_goal_positions],
+                    "extra_goal_positions": [{'center': ego.aabb.center.tolist(), 'size': ego.aabb.sizes.tolist()} for ego in extra_goal_objs],
                 }
                 for k in action:
                     if k not in ['objectgoal', 'action', 'success']:
@@ -505,7 +508,7 @@ class Benchmark:
                 f'{m}={agg_metrics[m] / count_episodes:.2f}'
                 if not isinstance(agg_metrics[m], dict)
                 else f'{m}={json.dumps({sub_m: agg_metrics[m][sub_m] / count_episodes for sub_m in agg_metrics[m]})}'
-                for m in agg_metrics
+                for m in ["success", "all_goal_successes", "distance_to_goal"]
             ] + [f"room acc={sum(room_accuracy) / len(room_accuracy) if len(room_accuracy) > 0 else 0:.2f}"] + [f"time/step={round((time.time() - start_time) / total_timesteps, 2)}"]))
 
         avg_metrics = {k: v / count_episodes for k, v in agg_metrics.items()}
