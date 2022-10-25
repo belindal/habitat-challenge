@@ -49,14 +49,20 @@ hm3d_items = [
     'furniture', 'appliances', 'clothes', 'objects', 'misc',
     'unlabeled' # 41
 ]
+goal_items = ["chair", "bed", "sofa", "toilet", "tv_monitor", "plant"]
+goal_indices = [hm3d_items.index(goal) for goal in goal_items]
 rooms = [
      'bedroom', 'bathroom', 'closet', 'hallway', 'living room', 'dining room',
-     'kitchen', 'entrance', 'basement', 'staircase', 'laundry room',
-     'office', 'patio', 'stairs', 'lounge', 'sauna', 'shower room',
-     'playroom', 'garage', 'shed', 'storage', 'baby room', 'study',
+     'kitchen', 'entryway', 'basement', 'staircase', 'laundry room',
+     'office', 'deck', 'stairs', 'lounge', 'sauna', 'shower room',
+     'playroom', 'garage', 'shed', 'storage area', 'baby room', #'study',
      "kid's room", 'gym', 'shower', 'attic', 'dressing room', 'pantry']
+for goal in range(len(goal_items)):
+    print(goal_items[goal])
+    room_items = [room for room_idx, room in enumerate(rooms) if hm3d_items2room_cooccurs[goal_indices[goal]][room_idx] > 0.99]
+    print(room_items)
 gt_hm3d_items2room_cooccurs = np.load("/raid/lingo/bzl/Stubborn/rednet-finetuning/figures/real_room_obj_plausimplaus_hm3d_cooccurence.npy", allow_pickle=True)
-
+# breakpoint()
 # name_to_mpcat40_id = {category.category: category.mpcat40index for category in category_mappings}
 
 # {'wall': 0, 'floor': 1, 'chair': 2, 'door': 3, 'table': 4, 'picture': 5, 'cabinet': 6, 'cushion': 7, 'window': 8, 'sofa': 9, 'bed': 10, 'curtain': 11, 'chest_of_drawers': 12, 'plant': 13, 'sink': 14, 'stairs': 15, 'ceiling': 16, 'toilet': 17, 'stool': 18, 'towel': 19, 'mirror': 20, 'tv_monitor': 21, 'shower': 22, 'column': 23, 'bathtub': 24, 'counter': 25, 'fireplace': 26, 'lighting': 27, 'beam': 28, 'railing': 29, 'shelving': 30, 'blinds': 31, 'gym_equipment': 32, 'seating': 33, 'board_panel': 34, 'furniture': 35, 'appliances': 36, 'clothes': 37, 'objects': 38, 'misc': 39, 'unlabeled': 40}
@@ -203,7 +209,7 @@ class Benchmark:
         extra_objs_success = []
 
         count_episodes = 0
-        existing_results = set()
+        existing_results = {}
         if agent.args.do_error_analysis:
             os.makedirs(agent.args.dump_location, exist_ok=True)
             results_file = os.path.join(agent.args.dump_location, "results.jsonl")
@@ -212,7 +218,7 @@ class Benchmark:
                     for line in f:
                         if "====" in line or line.strip() == "": continue
                         line = json.loads(line)
-                        existing_results.add(line['env_id'])
+                        existing_results[line['env_id']] = line
             with open(results_file, "a") as wf:
                 wf.write("\n====\n")
         pbar = tqdm(range(num_episodes), desc="")
@@ -257,8 +263,10 @@ class Benchmark:
             # if os.path.split(eps.scene_id)[-1].split('.')[0] != "Nfvxx8J5NCo": continue
             # if os.path.split(eps.scene_id)[-1].split('.')[0] != "5cdEh9F2hJL": continue
             # if os.path.split(eps.scene_id)[-1].split('.')[0] != "q3zU7Yy5E5s": continue
-            # if env_id != "32_wcojb4TFT35_sofa": continue
-            if env_id in existing_results: continue
+            # if env_id != "81_Dd4bFSTQ8gi_chair": continue
+            # if env_id not in ['47_5cdEh9F2hJL_chair', '36_Nfvxx8J5NCo_chair', '41_XB4GS9ShBRE_chair', '62_cvZr5TUy5C5_chair', '50_bxsVRursffK_chair', '3_q3zU7Yy5E5s_chair', '32_TEEsavR23oF_chair', '60_5cdEh9F2hJL_chair', '74_QaLdnwvtxbs_chair', '4_5cdEh9F2hJL_chair', '58_q3zU7Yy5E5s_chair', '61_Dd4bFSTQ8gi_chair', '33_mv2HUxq3B53_chair', '98_5cdEh9F2hJL_chair', '94_DYehNKdT76V_chair', '35_q3zU7Yy5E5s_chair', '18_bxsVRursffK_chair', '81_p53SfW6mjZe_chair', '0_6s7QHgap2fW_chair', '95_DYehNKdT76V_chair', '91_q3zU7Yy5E5s_chair', '58_QaLdnwvtxbs_chair', '74_Dd4bFSTQ8gi_chair', '74_5cdEh9F2hJL_chair', '60_Dd4bFSTQ8gi_chair', '0_Dd4bFSTQ8gi_chair', '56_cvZr5TUy5C5_chair', '89_mv2HUxq3B53_chair', '52_5cdEh9F2hJL_chair', '57_qyAac8rV8Zk_chair', '34_DYehNKdT76V_chair', '89_p53SfW6mjZe_chair', '12_cvZr5TUy5C5_chair', '29_mv2HUxq3B53_chair', '32_5cdEh9F2hJL_chair', '51_Nfvxx8J5NCo_chair', '84_5cdEh9F2hJL_chair', '89_Dd4bFSTQ8gi_chair', '87_q3zU7Yy5E5s_chair', '37_Dd4bFSTQ8gi_chair', '6_p53SfW6mjZe_chair', '81_DYehNKdT76V_chair', '83_p53SfW6mjZe_chair', '64_svBbv1Pavdk_chair', '36_Dd4bFSTQ8gi_chair', '51_bxsVRursffK_chair', '40_5cdEh9F2hJL_chair', '76_5cdEh9F2hJL_chair', '2_q3zU7Yy5E5s_chair', '88_qyAac8rV8Zk_chair', '31_DYehNKdT76V_chair', '95_q3zU7Yy5E5s_chair', '94_Nfvxx8J5NCo_chair', '45_6s7QHgap2fW_chair', '62_q3zU7Yy5E5s_chair', '1_q3zU7Yy5E5s_chair', '47_QaLdnwvtxbs_chair', '90_bxsVRursffK_chair', '96_qyAac8rV8Zk_chair', '97_Dd4bFSTQ8gi_chair']:
+            #     continue
+            # if env_id in existing_results: final_position = line["final_position"]; continue
             # if eps.scene_id in seen_scenes: continue
             sem_category_id_to_names = [obj.category.name() for obj_id, obj in enumerate(self._env.sim.semantic_scene.objects)]
             sem_category_id_to_mpcat40_ids = []
@@ -283,7 +291,7 @@ class Benchmark:
                 elif obj_name == "couch": obj_name = "sofa"
                 elif "sofa" in obj_name: obj_name = "sofa"
                 elif "plant" in obj_name: obj_name = "plant"
-                elif "chair" in obj_name: obj_name = "chair"
+                elif "chair" in obj_name or obj_name == "stool": obj_name = "chair"
                 if sum((category_mappings["raw_category"] == obj_name) | (category_mappings["category"] == obj_name) | (category_mappings['mpcat40'] == obj_name)) == 0:
                     # print(obj_name)
                     cat_id = 40  # unknown
@@ -294,6 +302,12 @@ class Benchmark:
                     all_goal_objs.append(obj)
                     if obj_id not in goal_ids:
                         extra_goal_objs.append(obj)
+            if env_id in existing_results:
+                result = existing_results[env_id]
+                result["extra_goal_positions"] = [{'center': ego.aabb.center.tolist(), 'size': ego.aabb.sizes.tolist()} for ego in extra_goal_objs]
+                with open(results_file, "a") as wf:
+                    wf.write(json.dumps(result)+"\n")
+                continue
             # # eps.goals.extend([ObjectGoal(object_id=obj.id.split('_')[-1], object_name=obj.category.name(), object_category=obj.id, position=obj.aabb.center) for obj in all_goal_objs])
             # if len(all_goal_objs) != len(eps.goals) or missing_goal:
             #     # # discongruity in annotation (potentially wrong annotation), skip
@@ -391,14 +405,19 @@ class Benchmark:
                 """
                 find best room -- top of sorted list (if not > 0.95, delete)
                 """
+                # accessible_rooms_of_type = []
                 for room_type in sorted_room_types:
                     rooms_of_type = roomtype2room.get(room_type, {}).get(eps.scene_id, {})
                     accessible_rooms_of_type = list(set(rooms_on_floor).intersection(set(rooms_of_type.keys())))
-                    if len(accessible_rooms_of_type) > 0 or room2score[room_type] < threshold: break
-                if room2score[room_type] >= threshold:
+                    accessible_rooms_of_type = sorted(accessible_rooms_of_type, key=lambda room: (rooms_of_type.get, ((
+                        observations["gps"] - convert_to_gps_coords(room_id_to_info[room]['bb'].mean(-1), eps.start_position, eps.start_rotation))**2).sum()), reverse=True)
+                    # if len(accessible_rooms_of_type) > 0 or room2score[room_type] < threshold: break
+                    # if room2score[room_type] < threshold: break
+                    # if len(accessible_rooms_of_type) > 0:
+                    # breakpoint()
                     # sort by "proportion" of region dedicated to this room
-                    accessible_rooms_of_type = sorted(accessible_rooms_of_type, key=rooms_of_type.get, reverse=True)
-                    prior_rooms_containing_goal.extend(accessible_rooms_of_type)
+                    # accessible_rooms_of_type = sorted(accessible_rooms_of_type, key=(sorted_room_types.index(),rooms_of_type.get), reverse=True)
+                    prior_rooms_containing_goal.extend([room for room in accessible_rooms_of_type if room not in prior_rooms_containing_goal])
                     # if goal_obj == "chair": breakpoint()
                     # # is confidence we'll find obj in this room type > 0.95?
                     # room_goal_cooccur_confidences = max(room2score[room_type] for room_type in room2roomtype[eps.scene_id][lmprior_rooms_containing_goal[0]])
@@ -437,9 +456,10 @@ class Benchmark:
                     # sort goal rooms by distance to current gps position
                     observations['goal_rooms'].sort(key=lambda room: ((observations["gps"] - convert_to_gps_coords(room_id_to_info[room]['bb'].mean(-1), eps.start_position, eps.start_rotation))**2).sum())
                 elif agent.args.explore_room_order in ["lm_prior", "gt_prior"]:
+                    # already sorted
                     observations['goal_rooms'] = prior_rooms_containing_goal
                     # sort goal rooms by distance to current gps position
-                    observations['goal_rooms'].sort(key=lambda room: (rooms_of_type.get, ((observations["gps"] - convert_to_gps_coords(room_id_to_info[room]['bb'].mean(-1), eps.start_position, eps.start_rotation))**2).sum()))
+                    # observations['goal_rooms'].sort(key=lambda room: (rooms_of_type.get, ((observations["gps"] - convert_to_gps_coords(room_id_to_info[room]['bb'].mean(-1), eps.start_position, eps.start_rotation))**2).sum()))
                 # breakpoint()
                 """
                 # add in rest of rooms (also sorted by distance)
@@ -471,7 +491,6 @@ class Benchmark:
                 # false negative (but what if taret object not yet in sight????)
                 # self._env.task._sim.get_agent_state().position
 
-            existing_results.add(env_id)
             metrics = self._env.get_metrics()
             extra_goals_success = False
             if len(extra_goal_objs) > 0:
@@ -502,6 +521,7 @@ class Benchmark:
                     accessible_rooms = [room2roomtype[eps.scene_id].get(room, "Unknown") for room in rooms_on_floor]
                     result = {**result, "actual rooms": real_roomtypes, "pred room": pred_roomtypes, "accessible rooms": accessible_rooms, "correctly pred room": list(room_intersection)}
                 with open(results_file, "a") as wf:
+                    existing_results[env_id] = result
                     wf.write(json.dumps(result)+"\n")
             count_episodes += 1
             pbar.set_description(' '.join([
