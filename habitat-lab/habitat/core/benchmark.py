@@ -26,12 +26,20 @@ from habitat.utils.geometry_utils import (
     quaternion_rotate_vector,
 )
 from habitat.tasks.nav.object_nav_task import ObjectGoal
+from habitat.utils.gpt3_utils import load_gpt3_cache, save_gpt3_result, gpt3_score_prompt, global_prompt
 
 import pandas as pd
 import cv2
 from PIL import Image
 from quaternion import quaternion
 import csv
+import torch
+
+
+model_type = "text"
+engine = f"{model_type}-davinci-002"
+gpt3_file = f"gpt3/cache_{engine}.jsonl"
+gpt3_cache = load_gpt3_cache(gpt3_file)
 category_mappings = pd.read_csv("/raid/lingo/bzl/habitat-challenge/habitat-sim/data/matterport_semantics/matterport_category_mappings.tsv", sep='    ', header=0)
 
 possible_labels = ["OK", "Not OK"]
@@ -392,8 +400,8 @@ class Benchmark:
             # # # TODO DELETE
             # seen_scenes.add(eps.scene_id)
             # continue
-            if agent.args.explore_room_order == "lm_prior" or agent.args.explore_room_order == "gt_prior":
-                prior_rooms_containing_goal = []
+            if agent.args.explore_room_order in ["lm_prior", "gt_prior", "lm_socratic"]:
+                pred_rooms_containing_goal = []
                 if agent.args.explore_room_order == "lm_prior":
                     room2score = {rooms[i]: hm3d_items2room_cooccurs[hm3d_items.index(goal_obj),i] for i in range(len(rooms))}
                     threshold = 0.3
@@ -402,34 +410,61 @@ class Benchmark:
                     room2score = {rooms[i]: gt_hm3d_items2room_cooccurs[hm3d_items.index(goal_obj),i] for i in range(len(rooms))}
                     threshold = 0.0
                     sorted_room_types = sorted(rooms, key=room2score.get, reverse=True)
+                elif agent.args.explore_room_order == "lm_socratic":
+                    room_types_to_count = {} #= [ ]
+                    all_room_types = []
+                    for room in rooms_on_floor:
+                        if room in room2roomtype[eps.scene_id]:
+                            roomtypes = room2roomtype[eps.scene_id][room]
+                            for roomtype in roomtypes:
+                                if roomtype not in room_types_to_count:
+                                    room_types_to_count[roomtype] = 0
+                                    all_room_types.append(roomtype)
+                                room_types_to_count[roomtype] += 1
+                    all_room_types = sorted(all_room_types)  # alphabetical in prompt
+                    room_prompt = []
+                    for room in all_room_types:
+                        room_name = room
+                        if room_types_to_count[room] > 1:
+                            room_name += 's'
+                        room_prompt.append(f"{room_types_to_count[room]} {room_name}")
+                    room_prompt = ', '.join(room_prompt)
+                    all_remaining_room_types = [room_type for room_type in all_room_types]
+                    prompt_so_far = f"{global_prompt}The house has: {room_prompt}.\nYou want to find a {goal_obj}. First go to each "
+                    sorted_room_types = []
+                    for _ in all_room_types:
+                        if len(all_remaining_room_types) == 1:
+                            sorted_room_types.append(all_remaining_room_types[0])
+                            break
+                        room_scores, _ = gpt3_score_prompt(
+                            engine=engine,
+                            input_prefix=prompt_so_far,
+                            classes=all_remaining_room_types,
+                            cache=gpt3_cache,
+                        )
+                        next_room_idx = torch.tensor(room_scores).argmax()
+                        prompt_so_far += f"{all_remaining_room_types[next_room_idx]}. If not found, go to each "
+                        sorted_room_types.append(all_remaining_room_types[next_room_idx])
+                        del all_remaining_room_types[next_room_idx]
+                    # sorted_room_types.append(pred_rooms_containing_goal)
                 """
                 find best room -- top of sorted list (if not > 0.95, delete)
                 """
+                # if agent.args.explore_room_order != "lm_socratic":
                 # accessible_rooms_of_type = []
                 for room_type in sorted_room_types:
                     rooms_of_type = roomtype2room.get(room_type, {}).get(eps.scene_id, {})
                     accessible_rooms_of_type = list(set(rooms_on_floor).intersection(set(rooms_of_type.keys())))
                     accessible_rooms_of_type = sorted(accessible_rooms_of_type, key=lambda room: (rooms_of_type.get, ((
                         observations["gps"] - convert_to_gps_coords(room_id_to_info[room]['bb'].mean(-1), eps.start_position, eps.start_rotation))**2).sum()), reverse=True)
-                    # if len(accessible_rooms_of_type) > 0 or room2score[room_type] < threshold: break
-                    # if room2score[room_type] < threshold: break
-                    # if len(accessible_rooms_of_type) > 0:
-                    # breakpoint()
-                    # sort by "proportion" of region dedicated to this room
-                    # accessible_rooms_of_type = sorted(accessible_rooms_of_type, key=(sorted_room_types.index(),rooms_of_type.get), reverse=True)
-                    prior_rooms_containing_goal.extend([room for room in accessible_rooms_of_type if room not in prior_rooms_containing_goal])
-                    # if goal_obj == "chair": breakpoint()
-                    # # is confidence we'll find obj in this room type > 0.95?
-                    # room_goal_cooccur_confidences = max(room2score[room_type] for room_type in room2roomtype[eps.scene_id][lmprior_rooms_containing_goal[0]])
-                    # if room_goal_cooccur_confidences < 0.95:
-                    #     lmprior_rooms_containing_goal = []
-                room_intersection = set(prior_rooms_containing_goal).intersection(set(rooms_containing_goal))
-                room_found.append(len(prior_rooms_containing_goal) > 0)
+                    pred_rooms_containing_goal.extend([room for room in accessible_rooms_of_type if room not in pred_rooms_containing_goal])
+                room_intersection = set(pred_rooms_containing_goal).intersection(set(rooms_containing_goal))
+                room_found.append(len(pred_rooms_containing_goal) > 0)
                 room_accuracy.append(len(room_intersection) > 0)
                 """
                 with open(f"{agent.args.dump_location}/objroom_cooccurs_nav.jsonl", "a") as wf:
                     real_roomtypes = [room2roomtype[eps.scene_id].get(room, "Unknown") for room in rooms_containing_goal]
-                    pred_roomtypes = [room2roomtype[eps.scene_id].get(room, "Unknown") for room in prior_rooms_containing_goal]
+                    pred_roomtypes = [room2roomtype[eps.scene_id].get(room, "Unknown") for room in pred_rooms_containing_goal]
                     accessible_rooms = [room2roomtype[eps.scene_id].get(room, "Unknown") for room in rooms_on_floor]
                     wf.write(json.dumps({"goal": goal_obj, "actual rooms": real_roomtypes, "pred room": pred_roomtypes, "accessible rooms": accessible_rooms, "eps": env_id})+"\n")
                     # breakpoint()
@@ -455,9 +490,9 @@ class Benchmark:
                     observations['goal_rooms'] = rooms_on_floor
                     # sort goal rooms by distance to current gps position
                     observations['goal_rooms'].sort(key=lambda room: ((observations["gps"] - convert_to_gps_coords(room_id_to_info[room]['bb'].mean(-1), eps.start_position, eps.start_rotation))**2).sum())
-                elif agent.args.explore_room_order in ["lm_prior", "gt_prior"]:
+                elif agent.args.explore_room_order in ["lm_prior", "gt_prior", "lm_socratic"]:
                     # already sorted
-                    observations['goal_rooms'] = prior_rooms_containing_goal
+                    observations['goal_rooms'] = pred_rooms_containing_goal
                     # sort goal rooms by distance to current gps position
                     # observations['goal_rooms'].sort(key=lambda room: (rooms_of_type.get, ((observations["gps"] - convert_to_gps_coords(room_id_to_info[room]['bb'].mean(-1), eps.start_position, eps.start_rotation))**2).sum()))
                 # breakpoint()
@@ -484,8 +519,11 @@ class Benchmark:
                 # transform room to gps coordinates?
                 action = agent.act(observations)
                 total_timesteps += 1
-                if agent.timestep % 100 == 0:
-                    print(f"i={i}", f"env={env_id}", f"timestep={agent.timestep}", f"time/step = {(time.time() - start_time) / total_timesteps}")
+                # if agent.timestep % 100 == 0:
+                #     print(f"i={i}", f"env={env_id}", f"timestep={agent.timestep}", f"time/step = {(time.time() - start_time) / total_timesteps}")
+                if agent.timestep in agent.potential_stop_scenes:
+                    curr_step_metrics = self._env.get_metrics()
+                    agent.potential_stop_scenes[agent.timestep]["metrics"] = curr_step_metrics
                 observations = self._env.step(action)
                 # if self._env.task.measurements.measures['distance_to_goal']._metric:
                 # false negative (but what if taret object not yet in sight????)
@@ -515,9 +553,9 @@ class Benchmark:
                         result[k] = action[k]
                 # 'saw_target_frames': action['saw_target'], 'nearby_objs': action['nearby_objs'], 
                 # write to file
-                if agent.args.explore_room_order == "lm_prior" or agent.args.explore_room_order == "gt_prior":
+                if agent.args.explore_room_order in ["lm_prior", "gt_prior", "lm_socratic"]:
                     real_roomtypes = [room2roomtype[eps.scene_id].get(room, "Unknown") for room in rooms_containing_goal]
-                    pred_roomtypes = [room2roomtype[eps.scene_id].get(room, "Unknown") for room in prior_rooms_containing_goal]
+                    pred_roomtypes = [room2roomtype[eps.scene_id].get(room, "Unknown") for room in pred_rooms_containing_goal]
                     accessible_rooms = [room2roomtype[eps.scene_id].get(room, "Unknown") for room in rooms_on_floor]
                     result = {**result, "actual rooms": real_roomtypes, "pred room": pred_roomtypes, "accessible rooms": accessible_rooms, "correctly pred room": list(room_intersection)}
                 with open(results_file, "a") as wf:
