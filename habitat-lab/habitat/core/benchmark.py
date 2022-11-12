@@ -26,7 +26,7 @@ from habitat.utils.geometry_utils import (
     quaternion_rotate_vector,
 )
 from habitat.tasks.nav.object_nav_task import ObjectGoal
-from habitat.utils.gpt3_utils import load_gpt3_cache, save_gpt3_result, gpt3_score_prompt, global_prompt
+from habitat.utils.gpt3_utils import load_gpt3_cache, save_gpt3_result, gpt3_score_prompt, global_prompt, gpt3_constrained_generation
 
 import pandas as pd
 import cv2
@@ -430,19 +430,20 @@ class Benchmark:
                         room_prompt.append(f"{room_types_to_count[room]} {room_name}")
                     room_prompt = ', '.join(room_prompt)
                     all_remaining_room_types = [room_type for room_type in all_room_types]
-                    prompt_so_far = f"{global_prompt}The house has: {room_prompt}.\nYou want to find a {goal_obj}. First go to each "
+                    prompt_so_far = f"{global_prompt}The house has: {room_prompt}.\nYou want to find a {goal_obj.replace('_', ' ')}. First go to each "
                     sorted_room_types = []
                     for _ in all_room_types:
                         if len(all_remaining_room_types) == 1:
                             sorted_room_types.append(all_remaining_room_types[0])
                             break
-                        room_scores, _ = gpt3_score_prompt(
+                        # backup constrained generation
+                        next_room_idx = gpt3_constrained_generation(
                             engine=engine,
                             input_prefix=prompt_so_far,
                             classes=all_remaining_room_types,
                             cache=gpt3_cache,
+                            gpt3_file=gpt3_file,
                         )
-                        next_room_idx = torch.tensor(room_scores).argmax()
                         prompt_so_far += f"{all_remaining_room_types[next_room_idx]}. If not found, go to each "
                         sorted_room_types.append(all_remaining_room_types[next_room_idx])
                         del all_remaining_room_types[next_room_idx]
